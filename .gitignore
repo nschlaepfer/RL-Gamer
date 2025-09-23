@@ -1,0 +1,28 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor / OS cruft
+.DS_Store
+.idea/
+.vscode/
+
+# Checkpoints and artifacts
+agent.pt
+*.pt
+*.pth
+*.ckpt
+
+# Logs, recordings, misc outputs
+*.log
+*.mp4
+*.jsonl
+
+# Auto-generated benchmark stats
+perf_*.txt
