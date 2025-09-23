@@ -110,11 +110,13 @@ def env_thread_worker(
     obs, _ = env.reset(seed=envseed)
     h, w, _ = obs.shape
     obs_s[g_idx, :h, :w].copy_(torch.from_numpy(obs))
+    info_s[g_idx].zero_()
     bind_logger(game_id, g_idx, info_s)
 
     current_action = 0
     raw_action = 0
     repeat_remaining = 0
+    episode_return = 0.0
 
     while not shutdown.is_set():
         while time.time() > next_frame_due:
@@ -142,6 +144,13 @@ def env_thread_worker(
         log_step(current_action, obs, rew, term, trunc)
         obs_s[g_idx, :h, :w].copy_(torch.from_numpy(obs))
         frame_ctr[g_idx].add_(1)
+        episode_return += float(rew)
+
+        info_row = info_s[g_idx]
+        info_row[0] = float(rew)
+        info_row[1] = float(term)
+        info_row[2] = float(trunc)
+        info_row[3] = float(episode_return)
 
         repeat_remaining -= 1
 
@@ -150,6 +159,8 @@ def env_thread_worker(
             obs_s[g_idx, :h, :w].copy_(torch.from_numpy(obs))
             frame_ctr[g_idx].add_(1)
             repeat_remaining = 0
+            episode_return = 0.0
+            info_s[g_idx].zero_()
 
     log_close()
 

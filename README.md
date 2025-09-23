@@ -53,6 +53,8 @@ Create a `myagent.py` file alongside `gamer.py` exposing an `Agent` class with:
   either write discrete actions into `act_buffer` (in-place) or return an action
   tensor. Actions must be in `[0, MAX_ACTIONS)`; the runner clamps anything
   outside that range as a last resort but agents should enforce it themselves.
+  The `info` tensor currently supplies per-env scalars `(reward, terminated,
+  truncated, episode_return)` for the most recent step.
 
 **MPS Optimization Tips**
 - Convert the uint8 observations to channels-last FP16 before the model forward:
