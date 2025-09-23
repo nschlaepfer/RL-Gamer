@@ -15,7 +15,8 @@ import random
 import sys
 import threading
 import time
-from typing import Iterable, Mapping
+from dataclasses import dataclass, field
+from typing import Any, Iterable, Mapping, Optional
 
 import gymnasium as gym
 import numpy as np
@@ -41,6 +42,127 @@ MAX_ACTIONS = 18
 MAX_EPISODE_STEPS = int(45 * 60 * FPS)
 ACTION_REPEAT = 1
 STATS_INTERVAL = 10.0
+
+
+@dataclass
+class EpisodeTracker:
+    episodes: int = 0
+    total_return: float = 0.0
+    best_return: float = float("-inf")
+    total_steps: int = 0
+    best_steps: int = 0
+    last_info: dict[str, Any] = field(default_factory=dict)
+    best_info: dict[str, Any] = field(default_factory=dict)
+
+    _priority_keys = (
+        "level",
+        "stage",
+        "world",
+        "room",
+        "area",
+        "phase",
+        "lives",
+        "ale.lives",
+        "ale.frame_number",
+        "frame_number",
+        "score",
+    )
+
+    def record(self, episode_return: float, steps: int, info: Any) -> None:
+        filtered = self._filter_info(info)
+        self.episodes += 1
+        self.total_return += episode_return
+        self.total_steps += steps
+        self.last_info = filtered
+
+        if episode_return > self.best_return:
+            self.best_return = episode_return
+            self.best_steps = steps
+            self.best_info = filtered
+
+    def episode_log(self, game_id: str, env_idx: int, episode_return: float, steps: int, outcome: str) -> str:
+        avg_return = self.total_return / max(self.episodes, 1)
+        avg_steps = self.total_steps / max(self.episodes, 1)
+
+        parts = [
+            "[episode]",
+            f"game_id={game_id}",
+            f"env_index={env_idx}",
+            f"episodes={self.episodes}",
+            f"return={episode_return:.2f}",
+            f"avg_return={avg_return:.2f}",
+            f"best_return={self.best_return:.2f}",
+            f"steps={steps}",
+            f"avg_steps={avg_steps:.1f}",
+            f"outcome={outcome}",
+        ]
+
+        info_desc = self._format_info(self.last_info)
+        if info_desc:
+            parts.append(f"info[{info_desc}]")
+
+        best_info_desc = self._format_info(self.best_info)
+        if self.best_return == episode_return and best_info_desc:
+            parts.append(f"new_best[{best_info_desc}]")
+        elif best_info_desc:
+            parts.append(f"best_info[{best_info_desc}]")
+
+        return " ".join(parts)
+
+    def summary_log(self, game_id: str, env_idx: int) -> Optional[str]:
+        if self.episodes == 0:
+            return None
+
+        avg_return = self.total_return / self.episodes
+        avg_steps = self.total_steps / self.episodes
+        best_info_desc = self._format_info(self.best_info)
+
+        parts = [
+            "[summary]",
+            f"game_id={game_id}",
+            f"env_index={env_idx}",
+            f"episodes={self.episodes}",
+            f"avg_return={avg_return:.2f}",
+            f"best_return={self.best_return:.2f}",
+            f"avg_steps={avg_steps:.1f}",
+            f"best_steps={self.best_steps}",
+        ]
+        if best_info_desc:
+            parts.append(f"best_info[{best_info_desc}]")
+        return " ".join(parts)
+
+    def _filter_info(self, info: Any) -> dict[str, Any]:
+        if not isinstance(info, Mapping):
+            return {}
+        filtered: dict[str, Any] = {}
+        for key, value in info.items():
+            if isinstance(value, (int, float, str)):
+                filtered[str(key)] = value
+        return filtered
+
+    def _format_info(self, info: Mapping[str, Any]) -> str:
+        if not info:
+            return ""
+
+        parts: list[str] = []
+        added_keys: set[str] = set()
+        for key in self._priority_keys:
+            if key in info:
+                parts.append(f"{key}={info[key]}")
+                added_keys.add(key)
+
+        if len(parts) < 4:
+            for key in sorted(info.keys()):
+                if key in added_keys:
+                    continue
+                value = info[key]
+                if isinstance(value, (int, float, str)):
+                    parts.append(f"{key}={value}")
+                    added_keys.add(key)
+                if len(parts) >= 4:
+                    break
+
+        return " ".join(parts)
 
 games = sorted([
     "ALE/Adventure-v5", "ALE/AirRaid-v5", "ALE/Alien-v5", "ALE/Amidar-v5", "ALE/Assault-v5",
@@ -138,6 +260,7 @@ def env_thread_worker(
     info_s: Tensor,
     frame_ctr: Tensor,
     shutdown: mp.Event,
+    log_returns: bool,
 ) -> None:
     import ale_py  # type: ignore  # noqa: F401 (import side-effect for Atari ROMs)
 
@@ -162,6 +285,8 @@ def env_thread_worker(
     raw_action = 0
     repeat_remaining = 0
     episode_return = 0.0
+    episode_steps = 0
+    tracker: Optional[EpisodeTracker] = EpisodeTracker() if log_returns else None
 
     warned_out_of_bounds = False
 
@@ -189,11 +314,12 @@ def env_thread_worker(
                     warned_out_of_bounds = True
                 current_action = max(0, min(action_bound - 1, current_action))
 
-        obs, rew, term, trunc, _ = env.step(current_action)
+        obs, rew, term, trunc, info = env.step(current_action)
         log_step(current_action, obs, rew, term, trunc)
         obs_s[g_idx, :h, :w].copy_(torch.from_numpy(obs))
         frame_ctr[g_idx].add_(1)
         episode_return += float(rew)
+        episode_steps += 1
 
         info_row = info_s[g_idx]
         info_row[0] = float(rew)
@@ -204,12 +330,22 @@ def env_thread_worker(
         repeat_remaining -= 1
 
         if term or trunc:
+            if tracker is not None:
+                tracker.record(episode_return, episode_steps, info)
+                outcome = "terminated" if term else "truncated"
+                print(tracker.episode_log(game_id, g_idx, episode_return, episode_steps, outcome))
             obs, _ = env.reset()
             obs_s[g_idx, :h, :w].copy_(torch.from_numpy(obs))
             frame_ctr[g_idx].add_(1)
             repeat_remaining = 0
             episode_return = 0.0
+            episode_steps = 0
             info_s[g_idx].zero_()
+
+    if tracker is not None:
+        summary = tracker.summary_log(game_id, g_idx)
+        if summary:
+            print(summary)
 
     log_close()
 
@@ -223,12 +359,13 @@ def env_proc(
     info_s: Tensor,
     frame_ctr: Tensor,
     shutdown: mp.Event,
+    log_returns: bool,
 ) -> None:
     seed("env", offset + 1)
     threads = [
         threading.Thread(
             target=env_thread_worker,
-            args=(first_start_at, game, offset + i, obs_s, act_s, info_s, frame_ctr, shutdown),
+            args=(first_start_at, game, offset + i, obs_s, act_s, info_s, frame_ctr, shutdown, log_returns),
             daemon=True,
         )
         for i, game in enumerate(game_chunk)
@@ -242,22 +379,31 @@ def env_proc(
 # -----------------------------------------------------------------------------
 # Agent process
 # -----------------------------------------------------------------------------
-def agent_proc(obs_s: Tensor, act_s: Tensor, info_s: Tensor, frame_ctr: Tensor, shutdown: mp.Event) -> None:
+def agent_proc(
+    obs_s: Tensor,
+    act_s: Tensor,
+    info_s: Tensor,
+    frame_ctr: Tensor,
+    shutdown: mp.Event,
+    eval_mode: bool = False,
+) -> None:
     seed("agent", 0)
     from myagent import Agent
 
     agent = Agent()
 
     save_path = "agent.pt"
-    try:
+    if os.path.exists(save_path):
         print(f"loading from {save_path=}")
         agent.load(save_path)
-    except Exception:
-        pass
-    print(f"saving to {save_path=}")
-    agent.save(save_path)
-    print(f"loading from {save_path=}")
-    agent.load(save_path)
+    else:
+        print(f"[runner] no checkpoint found at {save_path}, starting from fresh weights")
+
+    if not eval_mode:
+        print(f"saving to {save_path=}")
+        agent.save(save_path)
+        print(f"loading from {save_path=}")
+        agent.load(save_path)
 
     dev = device()
     use_async = dev.type in {"cuda", "mps"}
@@ -284,12 +430,12 @@ def agent_proc(obs_s: Tensor, act_s: Tensor, info_s: Tensor, frame_ctr: Tensor, 
         obs_dev.copy_(obs_s, non_blocking=use_async)
         info_dev.copy_(info_s, non_blocking=use_async)
 
-        maybe_actions = agent.act_and_learn(obs_dev, info_dev.clone(), act_dev)
+        maybe_actions = agent.act_and_learn(obs_dev, info_dev.clone(), act_dev, train=not eval_mode)
         actions_dev = act_dev if maybe_actions is None else maybe_actions
 
         act_s.copy_(actions_dev.to(device="cpu", dtype=act_s.dtype))
 
-        if time.time() - last_save_time > 29 * 60:
+        if not eval_mode and time.time() - last_save_time > 29 * 60:
             print(f"saving to {save_path=}")
             agent.save(save_path)
             print(f"loading from {save_path=}")
@@ -323,12 +469,21 @@ def main(argv: Iterable[str] | None = None) -> None:
         type=str,
         help="Path to a YAML file containing environment variable overrides",
     )
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Run the agent in evaluation-only mode (no learning or checkpoint writes)",
+    )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     if args.config:
         load_config(args.config)
     else:
         refresh_runtime_config()
+
+    eval_mode = bool(args.eval)
+
+    log_returns = bool(eval_mode)
 
     first_start_at = time.time()
     mp.set_start_method("spawn", force=True)
@@ -340,14 +495,24 @@ def main(argv: Iterable[str] | None = None) -> None:
 
     shutdown = mp.Event()
 
-    proc_configs = [{"target": agent_proc, "args": (obs_s, act_s, info_s, frame_ctr, shutdown)}]
+    proc_configs = [{"target": agent_proc, "args": (obs_s, act_s, info_s, frame_ctr, shutdown, eval_mode)}]
     game_chunks = np.array_split(games, min(NUM_PROCS, NUM_ENVS))
     for idx, chunk in enumerate(game_chunks):
         offset = sum(len(c) for c in game_chunks[:idx])
         proc_configs.append(
             {
                 "target": env_proc,
-                "args": (first_start_at, chunk.tolist(), offset, obs_s, act_s, info_s, frame_ctr, shutdown),
+                "args": (
+                    first_start_at,
+                    chunk.tolist(),
+                    offset,
+                    obs_s,
+                    act_s,
+                    info_s,
+                    frame_ctr,
+                    shutdown,
+                    log_returns,
+                ),
             }
         )
 

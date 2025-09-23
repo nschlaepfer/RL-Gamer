@@ -329,28 +329,40 @@ class PPOAgent:
         obs: torch.Tensor,
         info: torch.Tensor,
         act_buffer: torch.Tensor,
+        *,
+        train: bool = True,
     ) -> Optional[torch.Tensor]:
         obs_proc = self._prepare_obs(obs)
-        rewards = info[:, 0].to(self.device, dtype=torch.float32)
-        dones = (info[:, 1] + info[:, 2]).to(self.device, dtype=torch.float32).clamp(0.0, 1.0)
+
+        if train:
+            rewards = info[:, 0].to(self.device, dtype=torch.float32)
+            dones = (info[:, 1] + info[:, 2]).to(self.device, dtype=torch.float32).clamp(0.0, 1.0)
 
         actions, logprob, value = self.act_and_infer(obs_proc)
 
-        if self.last_obs is not None:
-            self.rollout.add(
-                self.last_obs,
-                self.last_action,
-                self.last_logprob,
-                self.last_value,
-                rewards,
-                dones,
-            )
-            self._maybe_update(value)
+        if train:
+            if self.last_obs is not None:
+                self.rollout.add(
+                    self.last_obs,
+                    self.last_action,
+                    self.last_logprob,
+                    self.last_value,
+                    rewards,
+                    dones,
+                )
+                self._maybe_update(value)
 
-        self.last_obs = obs_proc.detach()
-        self.last_action = actions.detach()
-        self.last_logprob = logprob.detach()
-        self.last_value = value.detach()
+            self.last_obs = obs_proc.detach()
+            self.last_action = actions.detach()
+            self.last_logprob = logprob.detach()
+            self.last_value = value.detach()
+        else:
+            # Drop any partial rollout state to avoid mixing eval frames
+            self.rollout.clear()
+            self.last_obs = None
+            self.last_action = None
+            self.last_logprob = None
+            self.last_value = None
 
         if act_buffer.device != self.device:
             act_out = actions.to(device=act_buffer.device, dtype=act_buffer.dtype)
