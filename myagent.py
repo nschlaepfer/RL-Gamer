@@ -226,10 +226,7 @@ class PPOAgent:
             return
 
         obs_tensor = torch.stack(self.rollout.obs, dim=0).to(self.device, dtype=torch.float32)
-        if self.cfg.channels_last:
-            obs_tensor = obs_tensor.contiguous(memory_format=torch.channels_last)
-        else:
-            obs_tensor = obs_tensor.contiguous()
+        obs_tensor = obs_tensor.contiguous()
         actions_tensor = torch.stack(self.rollout.actions, dim=0).to(self.device)
         logprob_tensor = torch.stack(self.rollout.logprobs, dim=0).to(self.device)
         value_tensor = torch.stack(self.rollout.values, dim=0).to(self.device, dtype=torch.float32)
@@ -253,6 +250,8 @@ class PPOAgent:
         returns = advantages + value_tensor
 
         obs_flat = obs_tensor.view(T * N, *self.obs_shape)
+        if self.cfg.channels_last:
+            obs_flat = obs_flat.contiguous(memory_format=torch.channels_last)
         actions_flat = actions_tensor.view(T * N)
         logprob_flat = logprob_tensor.view(T * N)
         advantages_flat = advantages.view(T * N)

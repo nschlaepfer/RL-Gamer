@@ -118,6 +118,8 @@ def env_thread_worker(
     repeat_remaining = 0
     episode_return = 0.0
 
+    warned_out_of_bounds = False
+
     while not shutdown.is_set():
         while time.time() > next_frame_due:
             next_frame_due += 1.0 / FPS
@@ -134,10 +136,12 @@ def env_thread_worker(
         if action_set is not None:
             action_bound = len(action_set)
             if not 0 <= current_action < action_bound:
-                print(
-                    f"[warn] action {current_action} out of bounds (size={action_bound})",
-                    f"raw={raw_action} env={game_id} idx={g_idx}",
-                )
+                if not warned_out_of_bounds:
+                    print(
+                        f"[warn] clamping actions for {game_id}: agent produced {raw_action}"
+                        f" but action set size is {action_bound}",
+                    )
+                    warned_out_of_bounds = True
                 current_action = max(0, min(action_bound - 1, current_action))
 
         obs, rew, term, trunc, _ = env.step(current_action)

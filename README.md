@@ -7,9 +7,9 @@ This project hosts a high-throughput Atari evaluation loop intended for large-sc
 reinforcement-learning experiments. The default entry point `gamer.py` mirrors the
 original CUDA runner (`og.py`) while staying cross-platform: shared environment
 buffers live on CPU, and the agent process automatically selects CUDA, Apple MPS,
-or CPU for inference. The script also includes built-in performance telemetry so
-you can benchmark different process counts and action-repeat settings on powerful
-Apple Silicon machines (e.g., M3 Max with 128 GB unified memory) or high-end PCs.
+or CPU for inference. A modern PPO agent (IMPALA-style encoder + GAE) ships in
+`myagent.py`, enabling training out of the box on powerful Apple Silicon machines
+(e.g., M3 Max with 128 GB unified memory) or high-end CUDA desktops.
 
 ## Features
 - Spawns one agent process plus a configurable set of environment worker processes
@@ -33,41 +33,43 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip setuptools wheel
 
-# 1) Install PyTorch (CUDA/MPS support included in official wheels)
-pip install torch torchvision torchaudio
+# 1) Install runtime dependencies
+pip install -r requirements.txt
 
-# 2) Install Gymnasium, ALE interface, ROM fetcher, and recorder deps
-pip install gymnasium ale-py AutoROM ffmpeg-python opencv-python-headless
-
-# 3) Download Atari ROMs (accept the license once)
+# 2) Fetch Atari ROMs (accept the license once)
 AutoROM --accept-license
 ```
 
 If `AutoROM` emits `NotOpenSSLWarning` about LibreSSL, the download still
 completes successfully on macOS; the warning is harmless.
 
-## Agent Contract (`myagent.py`)
-Create a `myagent.py` file alongside `gamer.py` exposing an `Agent` class with:
+### Live Viewer (optional)
+The bundled `bg_record.py` module displays a real-time mosaic of all running
+envs using OpenCV. Because the viewer creates GUI windows, you must install the
+full `opencv-python` wheel (already included in `requirements.txt`). Launch the
+runner from a macOS session with GUI access to see the window.
 
-- `load(path: str) -> None`: Restore weights/optimizer state.
-- `save(path: str) -> None`: Persist current state.
-- `act_and_learn(obs: Tensor, info: Tensor, act_buffer: Tensor) -> Optional[Tensor]`:
-  Consume the latest batch of observations and info, update internal state, and
-  either write discrete actions into `act_buffer` (in-place) or return an action
-  tensor. Actions must be in `[0, MAX_ACTIONS)`; the runner clamps anything
-  outside that range as a last resort but agents should enforce it themselves.
-  The `info` tensor currently supplies per-env scalars `(reward, terminated,
-  truncated, episode_return)` for the most recent step.
+## Agent Architecture (`myagent.py`)
+`myagent.py` contains a fully functional PPO agent that both `gamer.py` and
+`og.py` import. Key traits:
 
-**MPS Optimization Tips**
-- Convert the uint8 observations to channels-last FP16 before the model forward:
-  ```python
-  obs = obs_tensor.permute(0, 3, 1, 2).contiguous(memory_format=torch.channels_last)
-  obs = obs.to(device="mps", dtype=torch.float16) / 255.0
-  model = model.to(device="mps", dtype=torch.float16, memory_format=torch.channels_last)
-  ```
-- Run once with `PYTORCH_ENABLE_MPS_FALLBACK=0` to surface unsupported ops, then
-  revert to `1` (the default) so PyTorch can fall back to CPU if needed.
+- IMPALA-style convolutional encoder with residual blocks and adaptive pooling.
+- PPO with GAE, multi-epoch minibatch updates, entropy/value regularization, and
+  gradient clipping.
+- AdamW optimizer tuned for high-throughput streaming of 64 ALE environments.
+- Automatic device selection (CUDA, MPS, or CPU) with channels-last layout for
+  convolutional efficiency.
+
+The agent consumes the runner's shared tensors via `act_and_learn`:
+
+- `obs`: `(N, 250, 160, 3)` uint8 frames batched across all envs.
+- `info`: per-env scalars `(reward, terminated, truncated, episode_return)` from
+  the most recent step.
+- `act_buffer`: shared int tensor where actions are written in-place.
+
+To substitute your own algorithm, keep the class signature (`Agent`) and the
+`load/save/act_and_learn` methods, but replace the PPO internals with your model
+and learning loop.
 
 ## Configuration
 `gamer.py` reads several environment variables at launch:
@@ -80,6 +82,12 @@ Create a `myagent.py` file alongside `gamer.py` exposing an `Agent` class with:
 | `ACTION_REPEAT` | `1` | Repeat each chosen action this many frames (reduces agent load). |
 | `STATS_INTERVAL` | `10` | Seconds between FPS reports logged by the agent process. |
 | `PYTORCH_ENABLE_MPS_FALLBACK` | `1` | Allow CPU fallbacks for unsupported MPS ops. |
+| `ROLLOUT_STEPS` | `128` | Number of timesteps collected before each PPO update. |
+| `RL_LR` | `3e-4` | PPO learning rate (set via AdamW). |
+| `RL_PPO_EPOCHS` | `4` | Policy/value passes per update. |
+| `RL_MINIBATCH` | `2048` | Minibatch size for PPO updates. |
+| `RL_ENTROPY_COEF` | `0.01` | Entropy bonus coefficient. |
+| `RL_VALUE_COEF` | `0.5` | Value loss coefficient. |
 
 All shared tensors use CPU memory, so you can safely tweak these values without
 worrying about GPU memory exhaustion. When `ACTION_REPEAT > 1`, the env threads
@@ -92,6 +100,8 @@ source .venv/bin/activate
 export myseed=0
 export RUNDURATIONSECONDS=1800
 export NUM_PROCS=12 ACTION_REPEAT=2 STATS_INTERVAL=20  # example benchmarking setup
+# PPO tuning knobs (override defaults as needed)
+export ROLLOUT_STEPS=256 RL_LR=2.5e-4 RL_PPO_EPOCHS=3
 python3 gamer.py
 ```
 
@@ -100,6 +110,8 @@ Console output highlights:
 - `[perf] aggregated_env_fps=...` lines report throughput across all games every
   `STATS_INTERVAL` seconds.
 - Env threads print their game IDs and seeds as they initialize.
+- `[ppo] update=...` lines summarize loss statistics each time PPO finishes an
+  optimization cycle.
 
 Interrupt with `Ctrl+C`; the script sets a shutdown event, joins workers, and
 terminates any stragglers after a short timeout. If any child process crashes,
@@ -111,23 +123,22 @@ terminates any stragglers after a short timeout. If any child process crashes,
 2. Adjust `ACTION_REPEAT` (2–4) if the agent cannot keep up with 60 Hz envs.
 3. Keep `myseed` fixed for comparable runs. Record `[perf]` metrics after each
    change to track progress.
-4. Profile the agent with `torch.profiler` or macOS Instruments if MPS becomes
+4. Monitor `[ppo]` logs; if policy loss oscillates wildly, lower `RL_LR` or
+   reduce `ROLLOUT_STEPS`. If updates feel sluggish, raise `ROLLOUT_STEPS` or
+   increase `NUM_PROCS` to collect experience faster.
+5. Profile the agent with `torch.profiler` or macOS Instruments if MPS becomes
    the bottleneck; ensure data format/dtype conversions happen once per batch.
 
-## Background Recording
-The repository now includes a minimal `bg_record.py` stub that satisfies the
-runner's imports without writing video or logs. It zeroes the shared info tensor
-and exits when the shutdown event fires. If you want full recording support,
-replace the stub with your own implementation that provides:
+## Background Recording & Live Viewer
+`bg_record.py` now implements a live OpenCV viewer. It tiles the shared RGB frames
+into a mosaic window (`RL-Gamer Live`) at ~30 FPS and honours the shutdown event.
+Close the window or press `q`/`Esc` to stop the session. The same API can be
+extended to capture video—swap in an ffmpeg pipeline if you want to record runs.
 
-- `bind_logger(game_id, env_idx, info_tensor)`
-- `log_step(action, obs, reward, terminated, truncated)`
-- `log_close()`
-- `bg_record_proc(obs_tensor, info_tensor, shutdown_event, games, first_start_at)`
-
-Ensure your recorder can consume CPU RGB frames. On macOS, prefer VideoToolbox
-encoders (e.g., `h264_videotoolbox`) for hardware acceleration. Install `ffmpeg`
-separately if required:
+If you prefer headless operation, replace the module with a no-op variant or add
+your own ffmpeg-based recorder. Ensure encoders can consume CPU RGB frames; on
+macOS, VideoToolbox (`h264_videotoolbox`) provides hardware acceleration. Install
+`ffmpeg` separately if required:
 ```bash
 brew install ffmpeg
 ```
@@ -144,8 +155,10 @@ brew install ffmpeg
 ## Repository Layout
 - `gamer.py` – Cross-platform runner with benchmarking hooks.
 - `og.py` – Original CUDA-centric runner kept for reference.
+- `myagent.py` – PPO agent used by both runners.
+- `bg_record.py` – Live OpenCV viewer (replace if you need recording only).
+- `requirements.txt` – Python dependencies for quick setup.
 - `README.md` – This guide.
-- (expected) `bg_record.py`, `myagent.py`, and any supporting modules.
 
 ## License
 No license information is provided. Add a LICENSE file if you plan to distribute

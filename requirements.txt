@@ -1,0 +1,9 @@
+torch
+torchvision
+torchaudio
+gymnasium
+ale-py
+AutoROM
+ffmpeg-python
+opencv-python
+numpy
