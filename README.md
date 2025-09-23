@@ -1,4 +1,7 @@
 # RL-Gamer Runner
+<img width="752" height="1147" alt="Screenshot 2025-09-23 at 11 09 11 AM" src="https://github.com/user-attachments/assets/a3be822f-8fe4-4a61-8692-36046fcafae1" />
+
+
 
 This project hosts a high-throughput Atari evaluation loop intended for large-scale
 reinforcement-learning experiments. The default entry point `gamer.py` mirrors the
