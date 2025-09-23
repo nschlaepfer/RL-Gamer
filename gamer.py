@@ -9,12 +9,13 @@ process plus multiple environment worker processes hosting per-game threads.
 
 from __future__ import annotations
 
+import argparse
 import os
 import random
 import sys
 import threading
 import time
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import gymnasium as gym
 import numpy as np
@@ -22,21 +23,24 @@ import torch
 import torch.multiprocessing as mp
 from torch import Tensor
 
+import yaml
+
 from bg_record import bind_logger, bg_record_proc, log_close, log_step
 
 # -----------------------------------------------------------------------------
 # Global configuration
 # -----------------------------------------------------------------------------
-NUM_PROCS = int(os.environ.get("NUM_PROCS", "16"))
-FPS = 60.0
-MAX_ACTIONS = 18
-MAX_EPISODE_STEPS = int(45 * 60 * FPS)
-ACTION_REPEAT = max(1, int(os.environ.get("ACTION_REPEAT", "1")))
-STATS_INTERVAL = float(os.environ.get("STATS_INTERVAL", "10"))
 
 os.environ.setdefault("myseed", "0")
 os.environ.setdefault("RUNDURATIONSECONDS", "1800")
 os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+
+NUM_PROCS = 16
+FPS = 60.0
+MAX_ACTIONS = 18
+MAX_EPISODE_STEPS = int(45 * 60 * FPS)
+ACTION_REPEAT = 1
+STATS_INTERVAL = 10.0
 
 games = sorted([
     "ALE/Adventure-v5", "ALE/AirRaid-v5", "ALE/Alien-v5", "ALE/Amidar-v5", "ALE/Assault-v5",
@@ -63,6 +67,47 @@ print(f"{NUM_ENVS=}")
 # -----------------------------------------------------------------------------
 # Helpers
 # -----------------------------------------------------------------------------
+def refresh_runtime_config() -> None:
+    global NUM_PROCS, ACTION_REPEAT, STATS_INTERVAL
+    NUM_PROCS = int(os.environ.get("NUM_PROCS", "16"))
+    ACTION_REPEAT = max(1, int(os.environ.get("ACTION_REPEAT", "1")))
+    STATS_INTERVAL = float(os.environ.get("STATS_INTERVAL", "10"))
+
+
+def load_config(path: str) -> None:
+    with open(path, "r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+    if not isinstance(data, Mapping):
+        raise ValueError(f"Config file {path} must contain a mapping at the top level.")
+
+    sections: list[Mapping] = []
+    for key in ("env", "runner", "agent"):
+        section = data.get(key)
+        if section is not None:
+            if not isinstance(section, Mapping):
+                raise ValueError(f"Config section '{key}' must be a mapping.")
+            sections.append(section)
+
+    top_level_scalars = {
+        key: value
+        for key, value in data.items()
+        if not isinstance(value, Mapping)
+    }
+    if top_level_scalars:
+        sections.append(top_level_scalars)
+
+    for section in sections:
+        for key, value in section.items():
+            if value is None:
+                continue
+            os.environ[str(key)] = str(value)
+
+    print(f"[config] loaded overrides from {path}")
+    refresh_runtime_config()
+
+
+refresh_runtime_config()
+
 def device() -> torch.device:
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -271,7 +316,20 @@ def agent_proc(obs_s: Tensor, act_s: Tensor, info_s: Tensor, frame_ctr: Tensor, 
 # -----------------------------------------------------------------------------
 # Entry point
 # -----------------------------------------------------------------------------
-def main() -> None:
+def main(argv: Iterable[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Run the RL-Gamer training loop")
+    parser.add_argument(
+        "--config",
+        type=str,
+        help="Path to a YAML file containing environment variable overrides",
+    )
+    args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.config:
+        load_config(args.config)
+    else:
+        refresh_runtime_config()
+
     first_start_at = time.time()
     mp.set_start_method("spawn", force=True)
 

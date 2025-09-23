@@ -1,0 +1,16 @@
+# More aggressive settings favouring fast policy updates on powerful machines.
+env:
+  myseed: 0
+  RUNDURATIONSECONDS: 3600
+  NUM_PROCS: 16
+  ACTION_REPEAT: 1
+  STATS_INTERVAL: 30
+
+agent:
+  ROLLOUT_STEPS: 384
+  RL_LR: 0.00035
+  RL_PPO_EPOCHS: 4
+  RL_MINIBATCH: 4096
+  RL_ENTROPY_COEF: 0.015
+  RL_VALUE_COEF: 0.5
+  RL_MAX_GRAD_NORM: 0.4

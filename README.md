@@ -117,6 +117,31 @@ Interrupt with `Ctrl+C`; the script sets a shutdown event, joins workers, and
 terminates any stragglers after a short timeout. If any child process crashes,
 `gamer.py` exits early with `RIP SOMEONE CRASHED`.
 
+## YAML Configuration Files
+You can capture preferred hyperparameters and runner settings in YAML files and
+load them at runtime:
+
+```bash
+python3 gamer.py --config configs/baseline.yaml
+```
+
+Each config file should contain one or more sections (`env`, `runner`, `agent`).
+Entries inside these sections are translated to environment variables before the
+processes spawn, so both the runner and agent honour the overrides. Example:
+
+```yaml
+env:
+  NUM_PROCS: 12
+  ACTION_REPEAT: 2
+agent:
+  RL_LR: 0.0002
+  ROLLOUT_STEPS: 256
+```
+
+Top-level scalar keys are also treated as environment variables, letting you mix
+and match styles. See `configs/baseline.yaml` and `configs/high_throughput.yaml`
+for ready-made profiles targeting balanced and aggressive training regimes.
+
 ## Benchmarking & Tuning
 1. Start with `NUM_PROCS` equal to your performance-core count (e.g., 12 on an
    M3 Max). Increase until the `[perf]` FPS stops improving.

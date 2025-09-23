@@ -1,0 +1,16 @@
+# Conservative defaults for multi-game Atari training on Apple Silicon / CUDA rigs.
+env:
+  myseed: 0
+  RUNDURATIONSECONDS: 1800
+  NUM_PROCS: 12
+  ACTION_REPEAT: 2
+  STATS_INTERVAL: 60
+
+agent:
+  ROLLOUT_STEPS: 256
+  RL_LR: 0.00025
+  RL_PPO_EPOCHS: 3
+  RL_MINIBATCH: 3072
+  RL_ENTROPY_COEF: 0.02
+  RL_VALUE_COEF: 0.5
+  RL_MAX_GRAD_NORM: 0.5
