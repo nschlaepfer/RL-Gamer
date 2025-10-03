@@ -1,0 +1,9 @@
+{
+  "permissionMode": "acceptEdits",
+  "allowedTools": ["Edit", "MultiEdit", "Write", "Read", "Search"],
+  "settingSources": ["project"],
+  "memory": {
+    "path": ".claude/CLAUDE.md",
+    "description": "Project-level memory seeded by emdash when provisioning a workspace."
+  }
+}
